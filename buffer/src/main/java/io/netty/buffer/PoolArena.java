@@ -83,7 +83,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
     protected PoolArena(PooledByteBufAllocator parent, int pageSize,
-          int maxOrder, int pageShifts, int chunkSize, int cacheAlignment) {
+            int maxOrder, int pageShifts, int chunkSize, int cacheAlignment) {
         this.parent = parent;
         this.pageSize = pageSize;
         this.maxOrder = maxOrder;
@@ -142,8 +142,8 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     abstract boolean isDirect();
 
     PooledByteBuf<T> allocate(PoolThreadCache cache, int reqCapacity, int maxCapacity) {
-        PooledByteBuf<T> buf = newByteBuf(maxCapacity);
-        allocate(cache, buf, reqCapacity);
+        PooledByteBuf<T> buf = newByteBuf(maxCapacity);// Tony: 获取到一个buf对象
+        allocate(cache, buf, reqCapacity);// Tony: 开始分配内存
         return buf;
     }
 
@@ -173,11 +173,11 @@ abstract class PoolArena<T> implements PoolArenaMetric {
 
     private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
         final int normCapacity = normalizeCapacity(reqCapacity);
-        if (isTinyOrSmall(normCapacity)) { // capacity < pageSize
+        if (isTinyOrSmall(normCapacity)) { // capacity < pageSize  // Tony: 如果需要的容量小于pageSize
             int tableIdx;
             PoolSubpage<T>[] table;
             boolean tiny = isTiny(normCapacity);
-            if (tiny) { // < 512
+            if (tiny) { // < 512 // Tony: 小于512字节，分配一个tiny缓存
                 if (cache.allocateTiny(this, buf, reqCapacity, normCapacity)) {
                     // was able to allocate out of the cache so move on
                     return;
@@ -205,7 +205,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
                     assert s.doNotDestroy && s.elemSize == normCapacity;
                     long handle = s.allocate();
                     assert handle >= 0;
-                    s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity);
+                    s.chunk.initBufWithSubpage(buf, handle, reqCapacity);
                     incTinySmallAllocation(tiny);
                     return;
                 }
@@ -228,22 +228,23 @@ abstract class PoolArena<T> implements PoolArenaMetric {
             }
         } else {
             // Huge allocations are never served via the cache so just call allocateHuge
-            allocateHuge(buf, reqCapacity);
+            allocateHuge(buf, reqCapacity);// Tony: 分配超大内存，不会进行缓存
         }
     }
 
-    // Method must be called inside synchronized(this) { ... } block
+    // Method must be called inside synchronized(this) { ... } block
     private void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int normCapacity) {
         if (q050.allocate(buf, reqCapacity, normCapacity) || q025.allocate(buf, reqCapacity, normCapacity) ||
-            q000.allocate(buf, reqCapacity, normCapacity) || qInit.allocate(buf, reqCapacity, normCapacity) ||
-            q075.allocate(buf, reqCapacity, normCapacity)) {
+                q000.allocate(buf, reqCapacity, normCapacity) || qInit.allocate(buf, reqCapacity, normCapacity) ||
+                q075.allocate(buf, reqCapacity, normCapacity)) {
             return;
         }
 
         // Add a new chunk.
         PoolChunk<T> c = newChunk(pageSize, maxOrder, pageShifts, chunkSize);
-        boolean success = c.allocate(buf, reqCapacity, normCapacity);
-        assert success;
+        long handle = c.allocate(normCapacity);
+        assert handle > 0;
+        c.initBuf(buf, handle, reqCapacity);
         qInit.add(c);
     }
 
@@ -256,26 +257,26 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     }
 
     private void allocateHuge(PooledByteBuf<T> buf, int reqCapacity) {
-        PoolChunk<T> chunk = newUnpooledChunk(reqCapacity);
+        PoolChunk<T> chunk = newUnpooledChunk(reqCapacity);// Tony: 注意是unpool，这个字节缓冲release后不会缓存
         activeBytesHuge.add(chunk.chunkSize());
         buf.initUnpooled(chunk, reqCapacity);
         allocationsHuge.increment();
     }
-
-    void free(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, int normCapacity, PoolThreadCache cache) {
-        if (chunk.unpooled) {
+    // Tony: 释放缓存块
+    void free(PoolChunk<T> chunk, long handle, int normCapacity, PoolThreadCache cache) {
+        if (chunk.unpooled) {// Tony: 如果不需要再复用，则完全销毁掉
             int size = chunk.chunkSize();
             destroyChunk(chunk);
             activeBytesHuge.add(-size);
             deallocationsHuge.increment();
-        } else {
+        } else { // Tony: 如果是一个需要缓存的块，则加入缓存
             SizeClass sizeClass = sizeClass(normCapacity);
-            if (cache != null && cache.add(this, chunk, nioBuffer, handle, normCapacity, sizeClass)) {
+            if (cache != null && cache.add(this, chunk, handle, normCapacity, sizeClass)) {
                 // cached so not free it.
                 return;
             }
-
-            freeChunk(chunk, handle, sizeClass, nioBuffer);
+            // Tony: 如果无法继续加入缓存，则销毁掉这个chunk
+            freeChunk(chunk, handle, sizeClass);
         }
     }
 
@@ -286,23 +287,23 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         return isTiny(normCapacity) ? SizeClass.Tiny : SizeClass.Small;
     }
 
-    void freeChunk(PoolChunk<T> chunk, long handle, SizeClass sizeClass, ByteBuffer nioBuffer) {
+    void freeChunk(PoolChunk<T> chunk, long handle, SizeClass sizeClass) {
         final boolean destroyChunk;
         synchronized (this) {
             switch (sizeClass) {
-            case Normal:
-                ++deallocationsNormal;
-                break;
-            case Small:
-                ++deallocationsSmall;
-                break;
-            case Tiny:
-                ++deallocationsTiny;
-                break;
-            default:
-                throw new Error();
+                case Normal:
+                    ++deallocationsNormal;
+                    break;
+                case Small:
+                    ++deallocationsSmall;
+                    break;
+                case Tiny:
+                    ++deallocationsTiny;
+                    break;
+                default:
+                    throw new Error();
             }
-            destroyChunk = !chunk.parent.free(chunk, handle, nioBuffer);
+            destroyChunk = !chunk.parent.free(chunk, handle);
         }
         if (destroyChunk) {
             // destroyChunk not need to be called while holding the synchronized lock.
@@ -386,7 +387,6 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         }
 
         PoolChunk<T> oldChunk = buf.chunk;
-        ByteBuffer oldNioBuffer = buf.tmpNioBuf;
         long oldHandle = buf.handle;
         T oldMemory = buf.memory;
         int oldOffset = buf.offset;
@@ -415,7 +415,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         buf.setIndex(readerIndex, writerIndex);
 
         if (freeOldMemory) {
-            free(oldChunk, oldNioBuffer, oldHandle, oldMaxLength, buf.cache);
+            free(oldChunk, oldHandle, oldMaxLength, buf.cache);
         }
     }
 
@@ -586,34 +586,34 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     @Override
     public synchronized String toString() {
         StringBuilder buf = new StringBuilder()
-            .append("Chunk(s) at 0~25%:")
-            .append(StringUtil.NEWLINE)
-            .append(qInit)
-            .append(StringUtil.NEWLINE)
-            .append("Chunk(s) at 0~50%:")
-            .append(StringUtil.NEWLINE)
-            .append(q000)
-            .append(StringUtil.NEWLINE)
-            .append("Chunk(s) at 25~75%:")
-            .append(StringUtil.NEWLINE)
-            .append(q025)
-            .append(StringUtil.NEWLINE)
-            .append("Chunk(s) at 50~100%:")
-            .append(StringUtil.NEWLINE)
-            .append(q050)
-            .append(StringUtil.NEWLINE)
-            .append("Chunk(s) at 75~100%:")
-            .append(StringUtil.NEWLINE)
-            .append(q075)
-            .append(StringUtil.NEWLINE)
-            .append("Chunk(s) at 100%:")
-            .append(StringUtil.NEWLINE)
-            .append(q100)
-            .append(StringUtil.NEWLINE)
-            .append("tiny subpages:");
+                .append("Chunk(s) at 0~25%:")
+                .append(StringUtil.NEWLINE)
+                .append(qInit)
+                .append(StringUtil.NEWLINE)
+                .append("Chunk(s) at 0~50%:")
+                .append(StringUtil.NEWLINE)
+                .append(q000)
+                .append(StringUtil.NEWLINE)
+                .append("Chunk(s) at 25~75%:")
+                .append(StringUtil.NEWLINE)
+                .append(q025)
+                .append(StringUtil.NEWLINE)
+                .append("Chunk(s) at 50~100%:")
+                .append(StringUtil.NEWLINE)
+                .append(q050)
+                .append(StringUtil.NEWLINE)
+                .append("Chunk(s) at 75~100%:")
+                .append(StringUtil.NEWLINE)
+                .append(q075)
+                .append(StringUtil.NEWLINE)
+                .append("Chunk(s) at 100%:")
+                .append(StringUtil.NEWLINE)
+                .append(q100)
+                .append(StringUtil.NEWLINE)
+                .append("tiny subpages:");
         appendPoolSubPages(buf, tinySubpagePools);
         buf.append(StringUtil.NEWLINE)
-           .append("small subpages:");
+                .append("small subpages:");
         appendPoolSubPages(buf, smallSubpagePools);
         buf.append(StringUtil.NEWLINE);
 
@@ -699,7 +699,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         @Override
         protected PooledByteBuf<byte[]> newByteBuf(int maxCapacity) {
             return HAS_UNSAFE ? PooledUnsafeHeapByteBuf.newUnsafeInstance(maxCapacity)
-                    : PooledHeapByteBuf.newInstance(maxCapacity);
+                              : PooledHeapByteBuf.newInstance(maxCapacity);
         }
 
         @Override
@@ -730,8 +730,8 @@ abstract class PoolArena<T> implements PoolArenaMetric {
             // We can only calculate the offset if Unsafe is present as otherwise directBufferAddress(...) will
             // throw an NPE.
             int remainder = HAS_UNSAFE
-                    ? (int) (PlatformDependent.directBufferAddress(memory) & directMemoryCacheAlignmentMask)
-                    : 0;
+                            ? (int) (PlatformDependent.directBufferAddress(memory) & directMemoryCacheAlignmentMask)
+                            : 0;
 
             // offset = alignment - address & (alignment - 1)
             return directMemoryCacheAlignment - remainder;
@@ -766,7 +766,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
 
         private static ByteBuffer allocateDirect(int capacity) {
             return PlatformDependent.useDirectBufferNoCleaner() ?
-                    PlatformDependent.allocateDirectNoCleaner(capacity) : ByteBuffer.allocateDirect(capacity);
+                   PlatformDependent.allocateDirectNoCleaner(capacity) : ByteBuffer.allocateDirect(capacity);
         }
 
         @Override
@@ -780,7 +780,7 @@ abstract class PoolArena<T> implements PoolArenaMetric {
 
         @Override
         protected PooledByteBuf<ByteBuffer> newByteBuf(int maxCapacity) {
-            if (HAS_UNSAFE) {
+            if (HAS_UNSAFE) {// Tony: 能拿到unsafe对象，就用unsafe。此处有复用的实现
                 return PooledUnsafeDirectByteBuf.newInstance(maxCapacity);
             } else {
                 return PooledDirectByteBuf.newInstance(maxCapacity);

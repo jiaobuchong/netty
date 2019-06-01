@@ -419,8 +419,8 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     }
 
     @Override
-    protected void run() {
-        for (;;) {
+    protected void run() {// Tony: 有任务提交后，被触发执行
+        for (;;) {// Tony: 执行两件事selector,select的事件 和 taskQueue里面的内容
             try {
                 try {
                     switch (selectStrategy.calculateStrategy(selectNowSupplier, hasTasks())) {
@@ -479,7 +479,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                 needsToSelectAgain = false;
                 final int ioRatio = this.ioRatio;
                 if (ioRatio == 100) {
-                    try {
+                    try {// Tony: 处理事件
                         processSelectedKeys();
                     } finally {
                         // Ensure we always run tasks.
@@ -527,7 +527,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     private void processSelectedKeys() {
         if (selectedKeys != null) {
             processSelectedKeysOptimized();
-        } else {
+        } else {// Tony: 处理事件
             processSelectedKeysPlain(selector.selectedKeys());
         }
     }
@@ -566,14 +566,14 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         if (selectedKeys.isEmpty()) {
             return;
         }
-
+        // Tony: 获取selector所有选中的事件（ServerSocketChannel主要是OP_ACCEPT,SocketChannle主要是OP_READ）
         Iterator<SelectionKey> i = selectedKeys.iterator();
         for (;;) {
             final SelectionKey k = i.next();
             final Object a = k.attachment();
             i.remove();
 
-            if (a instanceof AbstractNioChannel) {
+            if (a instanceof AbstractNioChannel) {// Tony: 处理niochannel事件
                 processSelectedKey(k, (AbstractNioChannel) a);
             } else {
                 @SuppressWarnings("unchecked")
@@ -629,7 +629,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
 
     private void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
         final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
-        if (!k.isValid()) {
+        if (!k.isValid()) {// Tony: 判断是否可用
             final EventLoop eventLoop;
             try {
                 eventLoop = ch.eventLoop();
@@ -652,10 +652,10 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         }
 
         try {
-            int readyOps = k.readyOps();
+            int readyOps = k.readyOps();// Tony: 获取事件类型
             // We first need to call finishConnect() before try to trigger a read(...) or write(...) as otherwise
             // the NIO JDK channel implementation may throw a NotYetConnectedException.
-            if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
+            if ((readyOps & SelectionKey.OP_CONNECT) != 0) {// Tony: connect主要用于客户端
                 // remove OP_CONNECT as otherwise Selector.select(..) will always return without blocking
                 // See https://github.com/netty/netty/issues/924
                 int ops = k.interestOps();
@@ -674,8 +674,8 @@ public final class NioEventLoop extends SingleThreadEventLoop {
             // Also check for readOps of 0 to workaround possible JDK bug which may otherwise lead
             // to a spin loop
             if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0) {
-                unsafe.read();
-            }
+                unsafe.read();// Tony: accept 和 read 都在这里处理。
+            }// Tony: ServerSocketChannel用的是NioMessageUnsafe，socketchannel用的是niobyteunsafe
         } catch (CancelledKeyException ignored) {
             unsafe.close(unsafe.voidPromise());
         }

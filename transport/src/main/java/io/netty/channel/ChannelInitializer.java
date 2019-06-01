@@ -18,12 +18,11 @@ package io.netty.channel;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelHandler.Sharable;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
-import java.util.Collections;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * A special {@link ChannelInboundHandler} which offers an easy way to initialize a {@link Channel} once it was
@@ -54,19 +53,18 @@ import java.util.concurrent.ConcurrentHashMap;
 public abstract class ChannelInitializer<C extends Channel> extends ChannelInboundHandlerAdapter {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ChannelInitializer.class);
-    // We use a Set as a ChannelInitializer is usually shared between all Channels in a Bootstrap /
+    // We use a ConcurrentMap as a ChannelInitializer is usually shared between all Channels in a Bootstrap /
     // ServerBootstrap. This way we can reduce the memory usage compared to use Attributes.
-    private final Set<ChannelHandlerContext> initMap = Collections.newSetFromMap(
-            new ConcurrentHashMap<ChannelHandlerContext, Boolean>());
+    private final ConcurrentMap<ChannelHandlerContext, Boolean> initMap = PlatformDependent.newConcurrentHashMap();
 
     /**
      * This method will be called once the {@link Channel} was registered. After the method returns this instance
      * will be removed from the {@link ChannelPipeline} of the {@link Channel}.
      *
-     * @param ch            the {@link Channel} which was registered.
-     * @throws Exception    is thrown if an error occurs. In that case it will be handled by
-     *                      {@link #exceptionCaught(ChannelHandlerContext, Throwable)} which will by default close
-     *                      the {@link Channel}.
+     * @param ch the {@link Channel} which was registered.
+     * @throws Exception is thrown if an error occurs. In that case it will be handled by
+     * {@link #exceptionCaught(ChannelHandlerContext, Throwable)} which will by default close
+     * the {@link Channel}.
      */
     protected abstract void initChannel(C ch) throws Exception;
 
@@ -75,13 +73,10 @@ public abstract class ChannelInitializer<C extends Channel> extends ChannelInbou
     public final void channelRegistered(ChannelHandlerContext ctx) throws Exception {
         // Normally this method will never be called as handlerAdded(...) should call initChannel(...) and remove
         // the handler.
-        if (initChannel(ctx)) {
+        if (initChannel(ctx)) {// Tony: 收到注册成功的事件，先执行initChannel(ctx)，在执行方法重载的initChannel(ch)
             // we called initChannel(...) so we need to call now pipeline.fireChannelRegistered() to ensure we not
             // miss an event.
             ctx.pipeline().fireChannelRegistered();
-
-            // We are done with init the Channel, removing all the state for the Channel now.
-            removeState(ctx);
         } else {
             // Called initChannel(...) before which is the expected behavior, so just forward the event.
             ctx.fireChannelRegistered();
@@ -109,52 +104,35 @@ public abstract class ChannelInitializer<C extends Channel> extends ChannelInbou
             // The good thing about calling initChannel(...) in handlerAdded(...) is that there will be no ordering
             // surprises if a ChannelInitializer will add another ChannelInitializer. This is as all handlers
             // will be added in the expected order.
-            if (initChannel(ctx)) {
-
-                // We are done with init the Channel, removing the initializer now.
-                removeState(ctx);
-            }
+            initChannel(ctx);
         }
-    }
-
-    @Override
-    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
-        initMap.remove(ctx);
     }
 
     @SuppressWarnings("unchecked")
     private boolean initChannel(ChannelHandlerContext ctx) throws Exception {
-        if (initMap.add(ctx)) { // Guard against re-entrance.
-            try {
+        if (initMap.putIfAbsent(ctx, Boolean.TRUE) == null) { // Guard against re-entrance.
+            try {// Tony: 这个init方法一般就是创建channel时，实现的那个initchannel方法
                 initChannel((C) ctx.channel());
             } catch (Throwable cause) {
                 // Explicitly call exceptionCaught(...) as we removed the handler before calling initChannel(...).
                 // We do so to prevent multiple calls to initChannel(...).
                 exceptionCaught(ctx, cause);
-            } finally {
-                ChannelPipeline pipeline = ctx.pipeline();
-                if (pipeline.context(this) != null) {
-                    pipeline.remove(this);
-                }
+            } finally {// Tony: ChannelInitializer执行结束之后，会把自己从pipeline中删除掉，避免重复初始化
+                remove(ctx);
             }
             return true;
         }
         return false;
     }
 
-    private void removeState(final ChannelHandlerContext ctx) {
-        // The removal may happen in an async fashion if the EventExecutor we use does something funky.
-        if (ctx.isRemoved()) {
+    private void remove(ChannelHandlerContext ctx) {
+        try {
+            ChannelPipeline pipeline = ctx.pipeline();
+            if (pipeline.context(this) != null) {
+                pipeline.remove(this);
+            }
+        } finally {
             initMap.remove(ctx);
-        } else {
-            // The context is not removed yet which is most likely the case because a custom EventExecutor is used.
-            // Let's schedule it on the EventExecutor to give it some more time to be completed in case it is offloaded.
-            ctx.executor().execute(new Runnable() {
-                @Override
-                public void run() {
-                    initMap.remove(ctx);
-                }
-            });
         }
     }
 }
